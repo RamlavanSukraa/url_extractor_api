@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+numpy
+openai
+pandas
+Pillow
+pydantic
+pymongo
+Requests
+scikit_learn

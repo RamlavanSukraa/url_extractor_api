@@ -1,0 +1,43 @@
+Please extract the following information from the provided prescription image and present it in JSON format:
+
+patient_title: The title of the patient (e.g., Mr, Mrs, Ms, Baby). If the title is missing then add the title automatically by analysing the patient's sex. For eg if the patient's sex is M then Mr, if F then Ms and if the age of the patient is below 4 years. 
+patient_name: The full name of the patient, it should include first name, last name, initials, etc. This has to be given in English. In case of any (other than English) language, then transcript it in English letters.
+patient_name_reg: If the patient's name is not in English script, then add the reginal script name in this filed. If patient's name is given in English, then keep this filed as NA.
+patient_age: The age of the patient, this is the number.
+patient_age_period: The unit of the patient's age (e.g., Y for years, M for months, D for Days).
+patient_sex: This should give a biological sex of the patient, it can be M for Male, F for Female and T for Transgender, O for Others.
+patient_address: The complete address of the patient.
+patient_contact: Get the mobile number or contact number of the patient if given in prescription.
+date: The date given on the prescription, date should be in the format of YYYY-MM-DD irrespective of what is given in prescription. Convert it in the given format.
+ID: If there is any ID number given on prescription then can be given in this field, mostly it is Unique Hospital ID (UHID) or simply a number written like 15342.
+referrer_type: The type of referrer (e.g., If Doctor then D, H for Hospital, L for Lab, U for Corporates).
+referrer_name: The full name of the referrer. This has to be given in English. In case of any (other than English) language, then transcript it in English letters.
+referrer_name_reg: If the referrer's name is not in English script, then add the reginal script name in this filed. If patient's name is given in English, then keep this filed as NA.
+prescribed_test: A list of tests prescribed to the patient.
+remark: This field you can place any instruction or remark or extra details given in prescription. It can be instruction about when to give a sample or how or which sample to give.
+
+Now there are few cases where a single prescription may have more than one patients and their following data. You need to identify such cases and then extract all the patient's info and provide that in an array of the following json sample.
+
+Prescriptions may have test's complete name or short forms, try to give full forms of the tests, even if short form is written in prescription.
+Some prescriptions may not have all the data written or may not be clear in that case just place null in that field. Do not assume any data as this is sensitive information.
+
+For example:
+{
+    "patient_title": "Mr",
+    "patient_name": "Sri Kumar",
+    "patient_name_reg": "NA",
+    "patient_age": 65,
+    "patient_age_period": "Y",
+    "patient_sex": "M",
+    "patient_address": "Some Apartment, Some road, Chennai 600015",
+    "patient_contact": "7977854774",
+    "date": "2020-06-30",
+    "UHID/ID" : "12364",
+    "referrer_type": "Doctor",
+    "referrer_name": "Dr. Senthil Kumar",
+    "referrer_name_reg": "NA",
+    "prescribed_test": ["Complete Blood Count", "LFT", "HbA1c"],
+    "remark" : "samples to be collected - Blood and Urine in the morning"
+}
+
+Here is the prescription image encoded in base64 format:
