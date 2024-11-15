@@ -187,6 +187,9 @@ async def extract_and_map_tests(image_url: ImageURL):
             # Include the `booking_id` in the final response
             response_data = external_api_response.json()
             response_data["booking_id"] = image_url.booking_id
+
+            if '_id' in response_data:
+                response_data['_id'] =  str(response_data['_id']).replace("ObjectId(", "").replace(")", "").strip()
                     
             return response_data
         else:
