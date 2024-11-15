@@ -146,8 +146,10 @@ async def extract_and_map_tests(image_url: ImageURL):
 
         # Step 8: Prepare the payload for the external API
         logger.debug(f"Received booking ID: {image_url.booking_id}")
+        _id_string = extracted_data.get("_id",{}).get("$oid","")
 
         combined_result = {
+            "_id": _id_string,
             "extracted_data_AI": {
                 "doc_date": extracted_data['date'],
                 "pt_address": extracted_data['patient_address'],
