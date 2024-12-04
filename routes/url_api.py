@@ -131,7 +131,7 @@ async def extract_and_map_tests(request: ExtractionRequest):
         async with httpx.AsyncClient() as http_client:
             try:
                 external_api_response = await http_client.post(
-                    "http://51.20.150.57:5009/api/v1/prescriptions",
+                    "http://IP:Port/api/v1/prescriptions",
                     json=payload,
                     timeout=120
                 )
