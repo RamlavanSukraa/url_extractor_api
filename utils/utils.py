@@ -4,6 +4,7 @@ import os
 import socket
 import requests
 import base64
+import httpx
 from datetime import datetime
 from PIL import Image, ImageOps
 from fastapi import HTTPException
@@ -12,6 +13,8 @@ from utils.logger import app_logger
 
 # Configure logger
 logger = app_logger
+
+
 
 valid_extensions = ['png', 'jpg', 'jpeg', 'gif', 'webp']
 
@@ -130,3 +133,10 @@ def compress_image(image, max_size_mb: float):
     finally:
         if hasattr(image, 'seek'):
             image.seek(0)  # Reset file pointer after compression
+
+
+
+
+def to_empty_string(value):
+    return value if value is not None else ""
+

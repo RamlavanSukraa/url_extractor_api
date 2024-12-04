@@ -1,201 +1,160 @@
-import io
-import json
-import logging
-from datetime import datetime
-
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+import json
+from datetime import datetime
 import httpx
 
-from openai import OpenAI  # Ensure correct import for OpenAI client library
-from config import load_config, app_logger
-from utils.testMap_utils import map_test_code, map_ref_code
-from utils.utils import load_image_from_source, validate_image, encode_image, compress_image
+from config import load_config
+from openai import OpenAI
 
-# Setup logging config
+# Utils
+from utils.logger import app_logger
+from utils.testMap_utils import map_ref_code, map_test_code
+from utils.utils import to_empty_string
+from utils.openai_utils import prepare_openai_request, load_prompt_template
+
+# Setup logging
 logger = app_logger
 
-# Load configuration values
+# Load configuration
 config = load_config()
 API_KEY = config['api_key']
-MODEL = config['model']
-MAX_SIZE_MB = config['max_size_mb']
-threshold = config['threshold']
+THRESHOLD = config['threshold']
+client = OpenAI(api_key=API_KEY)
 
-# Initialize OpenAI client globally
-openai_client = OpenAI(api_key=API_KEY)
-
+# Define the Router
 router = APIRouter()
 
-# Pydantic model for input
-class ImageURL(BaseModel):
+# Define request model
+class ExtractionRequest(BaseModel):
     url: str
-    booking_id: str  # Ensure the booking ID is passed by the user
+    booking_id: str
+
 
 @router.post("/extract_and_map_tests_url/")
-async def extract_and_map_tests(image_url: ImageURL):
+async def extract_and_map_tests(request: ExtractionRequest):
     """
-    Extracts test names from an image given via an HTTP/HTTPS URL,
-    maps them to test codes, and sends the result to an external API.
-    The booking_id is provided by the user and is included in the payload.
+    Extracts patient details from the given image URL and maps them to test codes.
     """
+    logger.info("Starting patient details extraction and mapping process.")
+
     try:
-        logger.info(f"Received request for image processing from URL: {image_url.url}")
+        # Step 1: Load Prompt Template for OpenAI Request
+        logger.info("Loading prompt template for OpenAI request.")
+        prompt_template = load_prompt_template('prompt_template.txt')
 
-        # Step 1: Validate and load the image from the URL
-        if image_url.url.startswith("http://") or image_url.url.startswith("https://"):
-            image = load_image_from_source(image_url.url)
-            logger.debug("Image successfully loaded from URL.")
-        else:
-            logger.error("Invalid URL format provided.")
-            raise HTTPException(status_code=400, detail="Invalid URL format. Must be an HTTP/HTTPS URL.")
+        # Step 2: Prepare OpenAI Request Payload for Openai API
+        logger.info("Preparing request payload for OpenAI API.")
+        request_payload = prepare_openai_request(request.url, prompt_template)
 
-        # Step 2: Convert image to bytes and validate
-        logger.info("Converting image to bytes and validating.")
-        image_bytes = io.BytesIO()
-        image.save(image_bytes, format=image.format)
-        image_bytes.seek(0)
-        validate_image(image_bytes)
-        logger.info("Image validation complete.")
+        # Step 3: Call OpenAI API with Timeout
+        logger.info("Sending request to OpenAI API.")
+        try:
+            response = client.chat.completions.create(**request_payload, timeout=120) 
+            logger.info("Received response from OpenAI API.")
+        except Exception as e:
+            logger.error(f"OpenAI API communication error: {e}")
+            raise HTTPException(status_code=500, detail=f"OpenAI API error: {str(e)}")
 
-        # Step 3: Compress and encode the image
-        logger.info("Compressing the image if needed.")
-        compressed_image_path = compress_image(image_bytes, MAX_SIZE_MB)
-        logger.info(f"Image compressed and saved at: {compressed_image_path}")
+        # Step 4: Parse OpenAI Response
+        try:
+            gpt_response = json.loads(
+                response.choices[0].message.content.split('```json')[-1].split('```')[0]
+            )
+            logger.info("Response parsed successfully.")
+        except (json.JSONDecodeError, IndexError) as e:
+            logger.error(f"Failed to parse OpenAI API response: {e}")
+            raise HTTPException(status_code=500, detail="Failed to parse OpenAI response.")
 
-        logger.info("Encoding image to Base64.")
-        with open(compressed_image_path, 'rb') as f:
-            encoded_image = encode_image(f.read())
-        logger.info("Image encoding complete.")
+        # Step 5: Map Test Names
+        logger.info("Mapping test names from GPT response.")
+        test_names = gpt_response.get("prescribed_test", [])
+        if not test_names:
+            logger.warning("No test names found in the response.")
+            raise HTTPException(status_code=400, detail="No test names found in the extracted data.")
 
-        # Step 4: Read the prompt template
-        logger.info("Reading the prompt template for OpenAI request.")
-        with open('prompt_template.txt', 'r') as prompt_file:
-            prompt_template = prompt_file.read()
-
-        # Step 5: Send the image and prompt to OpenAI's API
-        logger.info("Sending the image to OpenAI API for test name extraction.")
-        response = openai_client.chat.completions.create(
-            model=MODEL,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are a helpful assistant that responds in JSON format. Extract patient data and prescribed lab tests from a medical prescription."
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": prompt_template
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:image/jpeg;base64,{encoded_image}"}
-                        }
-                    ]
-                }
-            ],
-            temperature=0.0,
-        )
-        logger.info("OpenAI API call complete.")
-
-        # Step 6: Parse the GPT response
-        logger.debug("Parsing the response from OpenAI API.")
-        gpt_response = response.choices[0].message.content.split('```json')[-1].split('```')[0]
-        extracted_data = json.loads(gpt_response)
-        logger.info("Parsed GPT response successfully.")
-
-
-
-
-        # Replace 'UHID/ID' with 'ID' for consistency
-        if "UHID/ID" in extracted_data:
-            extracted_data['ID'] = extracted_data.pop("UHID/ID")
-
-        # Set default values for all potentially missing fields
-        fields_to_check = [
-            "date", "patient_address", "patient_contact", "patient_age", "patient_age_period",
-            "patient_name", "patient_sex", "patient_title", "referrer_name", "referrer_type",
-            "matched_ref_name", "matched_ref_type", "matched_ref_code", "remark", "ID"
+        mapped_tests = [
+            {
+                "input_test_name": name,
+                "matched_test_name": mapped_name,
+                "matched_test_code": mapped_code
+            }
+            for name in test_names
+            if (mapped_name := map_test_code(name, THRESHOLD)[0]) and
+               (mapped_code := map_test_code(name, THRESHOLD)[1])
         ]
+        logger.info(f"Successfully mapped {len(mapped_tests)} test names.")
 
-        for field in fields_to_check:
-            extracted_data[field] = extracted_data.get(field, "") or ""
+        # Step 6: Map Referrer Information
+        ref_name = gpt_response.get("referrer_name", "")
+        matched_ref_name, matched_ref_code, matched_ref_type = map_ref_code(ref_name, THRESHOLD)
+        logger.info("Referrer information mapped successfully.")
 
-        # Ensure `pt_age` is a string
-        extracted_data['patient_age'] = str(extracted_data['patient_age'])
-
-        # Step 7: Extract test names and map them
-        test_names = extracted_data.get("prescribed_test", [])
-        mapped_tests = []
-        for input_test_name in test_names:
-            matched_test_name, matched_test_code = map_test_code(input_test_name, threshold)
-            mapped_tests.append({
-                "extracted_test_name": input_test_name,
-                "mapped_test_name": matched_test_name if matched_test_name else "",  # Ensure a non-null string
-                "mapped_test_code": matched_test_code if matched_test_code else ""   # Ensure a non-null string
-            })
-
-        ref_name = extracted_data.get('referrer_name', "")
-        logger.info(f"Mapping ref names to ref code for {ref_name}.")
-        matched_ref_name, matched_ref_code, matched_ref_type = map_ref_code(ref_name, threshold)
-        extracted_data['mapped_ref_name'] = matched_ref_name or ""
-        extracted_data['mapped_ref_code'] = matched_ref_code or ""
-        extracted_data['mapped_ref_type'] = matched_ref_type or ""
-
-        # Step 8: Prepare the payload for the external API
-        logger.debug(f"Received booking ID: {image_url.booking_id}")
-        _id_string = extracted_data.get("_id",{}).get("$oid","")
-
-        combined_result = {
-            "_id": _id_string,
+        # Step 7: Prepare Payload
+        logger.info("Preparing payload for external API.")
+        payload = {
             "extracted_data_AI": {
-                "doc_date": extracted_data['date'],
-                "pt_address": extracted_data['patient_address'],
-                "pt_age": extracted_data['patient_age'],
-                "pt_age_period": extracted_data['patient_age_period'],
-                "pt_contact": extracted_data['patient_contact'],
-                "pt_name": extracted_data['patient_name'],
-                "pt_sex": extracted_data['patient_sex'],
-                "pt_title": extracted_data['patient_title'],
-                "ref_name": extracted_data['referrer_name'],
-                "ref_type": extracted_data['referrer_type'],
-                "mapped_ref_name": extracted_data['mapped_ref_name'],
-                "mapped_ref_type": extracted_data['mapped_ref_type'],
-                "mapped_ref_code": extracted_data['mapped_ref_code'],
-                "remark": extracted_data['remark'],
-                "uhid_id": extracted_data['ID'],
-                "prescribed_tests": mapped_tests  # Send the mapped tests list, ensuring each field is present
+                "doc_date": to_empty_string(gpt_response.get("date")),
+                "pt_address": to_empty_string(gpt_response.get("patient_address")),
+                "pt_contact": to_empty_string(gpt_response.get("patient_contact")),
+                "pt_name": to_empty_string(gpt_response.get("patient_name")),
+                "pt_sex": to_empty_string(gpt_response.get("patient_sex")),
+                "pt_title": to_empty_string(gpt_response.get("patient_title")),
+                "ref_name": to_empty_string(gpt_response.get("referrer_name")),
+                "ref_type": to_empty_string(gpt_response.get("referrer_type")),
+                "pt_age": to_empty_string(str(gpt_response.get("patient_age", "Unknown"))),
+                "pt_age_period": to_empty_string(gpt_response.get("patient_age_period", "Unknown")),
+                "mapped_ref_name": to_empty_string(matched_ref_name),
+                "mapped_ref_type": to_empty_string(matched_ref_type),
+                "mapped_ref_code": to_empty_string(matched_ref_code),
+                "remark": to_empty_string(gpt_response.get("remark")),
+                "uhid_id": to_empty_string(gpt_response.get("ID")),
+                "prescribed_tests": [
+                    {
+                        "extracted_test_name": to_empty_string(test.get("input_test_name")),
+                        "mapped_test_name": to_empty_string(test.get("matched_test_name")),
+                        "mapped_test_code": to_empty_string(test.get("matched_test_code"))
+                    }
+                    for test in mapped_tests
+                ],
             },
             "created_by": {
-                "userId": "system",  # Replace with actual userId if needed
-                "CRNID": "system"    # Replace with actual CRNID if needed
+                "userId": "system",
+                "CRNID": "system"
             },
             "created_at": datetime.now().strftime("%Y-%m-%d-%H-%M-%S"),
-            "booking_id": image_url.booking_id  # Include the booking ID from the user input
+            "booking_id": request.booking_id,
         }
 
-        # Step 9: Send the payload to the external API
-        logger.info("Sending data to the external API.")
-        async with httpx.AsyncClient() as client:
-            external_api_response = await client.post("http://localhost:8000/api/v1/prescriptions", json=combined_result)
+        # Step 8: Send Data to External API with Timeout
+        logger.info("Sending data to the external API...")
+        async with httpx.AsyncClient() as http_client:
+            try:
+                external_api_response = await http_client.post(
+                    "http://51.20.150.57:5009/api/v1/prescriptions",
+                    json=payload,
+                    timeout=120
+                )
+            except httpx.RequestError as e:
+                logger.error(f"External API communication error: {e}")
+                raise HTTPException(status_code=500, detail="External API request failed.")
 
+        # Step 9: Handle External API Response
         if external_api_response.status_code == 201:
-            logger.info("Data successfully sent to the external API.")
-
-            # Include the `booking_id` in the final response
+            logger.info("Data successfully saved in MongoDB.")
             response_data = external_api_response.json()
-            response_data["booking_id"] = image_url.booking_id
+            response_data["booking_id"] = request.booking_id
 
             if '_id' in response_data:
-                response_data['_id'] =  str(response_data['_id']).replace("ObjectId(", "").replace(")", "").strip()
-                    
+                response_data['_id'] = str(response_data['_id']).replace("ObjectId(", "").replace(")", "").strip()
+                logger.info(f"Formatted MongoDB _id: {response_data['_id']}")
+
             return response_data
         else:
-            logger.error(f"Failed to send data to the external API. Status code: {external_api_response.status_code}, Response: {external_api_response.text}")
+            logger.error(f"Failed to send data to the external API. "
+                         f"Status code: {external_api_response.status_code}, Response: {external_api_response.text}")
             raise HTTPException(status_code=external_api_response.status_code, detail=f"Failed to send data: {external_api_response.text}")
 
     except Exception as e:
-        logger.error(f"Error during processing: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error during processing: {e}")
+        logger.error(f"An unexpected error occurred: {e}")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred.")
