@@ -45,10 +45,15 @@ async def extract_url(request: InputData):
         logger.info("Sending the image for data extraction.")
         with open(compressed_image_path, "rb") as image_file:
             async with httpx.AsyncClient(follow_redirects=True, timeout=120.0) as client:
-                response = await client.post(
-                    "http://127.0.0.1:8001/extract_and_map_tests/",
-                    files={"file": ("image", image_file)}
-                )
+                try:
+                    response = await client.post(
+                        "http://51.20.150.57:5006/extract_and_map_tests/",
+                        files={"file": ("image", image_file)}
+                    )
+                    response.raise_for_status()  # Raise detailed exceptions for HTTP errors
+                except httpx.RequestError as e:
+                    logger.error(f"Error communicating with the extraction API: {e}")
+                    raise HTTPException(status_code=500, detail=f"Connection error: {e}")
 
         if response.status_code != 200:
             raise HTTPException(
