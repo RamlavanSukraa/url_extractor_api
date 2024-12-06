@@ -1,160 +1,135 @@
+# routes/url_api.py
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-import json
-from datetime import datetime
 import httpx
+from datetime import datetime
+from fastapi.responses import JSONResponse
 
-from config import load_config
-from openai import OpenAI
-
-# Utils
+# import utils
+from utils.img_operations import load_image_from_url, validate_image, compress_image, encode_image
 from utils.logger import app_logger
-from utils.testMap_utils import map_ref_code, map_test_code
-from utils.utils import to_empty_string
-from utils.openai_utils import prepare_openai_request, load_prompt_template
 
-# Setup logging
+# Initialize the logger
 logger = app_logger
 
-# Load configuration
-config = load_config()
-API_KEY = config['api_key']
-THRESHOLD = config['threshold']
-client = OpenAI(api_key=API_KEY)
-
-# Define the Router
 router = APIRouter()
 
-# Define request model
-class ExtractionRequest(BaseModel):
+class InputData(BaseModel):
     url: str
     booking_id: str
 
-
-@router.post("/extract_and_map_tests_url/")
-async def extract_and_map_tests(request: ExtractionRequest):
-    """
-    Extracts patient details from the given image URL and maps them to test codes.
-    """
-    logger.info("Starting patient details extraction and mapping process.")
-
+@router.post("/api/v1/ExtractData")
+async def extract_url(request: InputData):
     try:
-        # Step 1: Load Prompt Template for OpenAI Request
-        logger.info("Loading prompt template for OpenAI request.")
-        prompt_template = load_prompt_template('prompt_template.txt')
+        logger.info(f"Processing request from URL: {request.url}")
 
-        # Step 2: Prepare OpenAI Request Payload for Openai API
-        logger.info("Preparing request payload for OpenAI API.")
-        request_payload = prepare_openai_request(request.url, prompt_template)
+        # Step 1: Load the image from the provided URL
+        image = load_image_from_url(request.url)
+        logger.info(f"Image successfully loaded. Format: {image.format}")
 
-        # Step 3: Call OpenAI API with Timeout
-        logger.info("Sending request to OpenAI API.")
-        try:
-            response = client.chat.completions.create(**request_payload, timeout=120) 
-            logger.info("Received response from OpenAI API.")
-        except Exception as e:
-            logger.error(f"OpenAI API communication error: {e}")
-            raise HTTPException(status_code=500, detail=f"OpenAI API error: {str(e)}")
+        # Step 2: Validate the image format
+        validate_image(image, request.url)
+        logger.info("Image validation successful.")
 
-        # Step 4: Parse OpenAI Response
-        try:
-            gpt_response = json.loads(
-                response.choices[0].message.content.split('```json')[-1].split('```')[0]
+        # Step 3: Compress the image to reduce image size
+        compressed_image_path = compress_image(image, max_size_mb=0.5)
+        logger.info(f"Image compressed successfully. Path: {compressed_image_path}")
+
+        # Step 4: Encode the image (if required by API)
+        with open(compressed_image_path, "rb") as f:
+            encoded_image = encode_image(f.read())
+        logger.info("Image encoded successfully.")
+
+        # Step 5: Send the compressed image to the AI engine
+        logger.info("Sending the image for data extraction.")
+        with open(compressed_image_path, "rb") as image_file:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=120.0) as client:
+                response = await client.post(
+                    "http://127.0.0.1:8001/extract_and_map_tests/",
+                    files={"file": ("image", image_file)}
+                )
+
+        if response.status_code != 200:
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Extraction API error: {response.text}",
             )
-            logger.info("Response parsed successfully.")
-        except (json.JSONDecodeError, IndexError) as e:
-            logger.error(f"Failed to parse OpenAI API response: {e}")
-            raise HTTPException(status_code=500, detail="Failed to parse OpenAI response.")
 
-        # Step 5: Map Test Names
-        logger.info("Mapping test names from GPT response.")
-        test_names = gpt_response.get("prescribed_test", [])
-        if not test_names:
-            logger.warning("No test names found in the response.")
-            raise HTTPException(status_code=400, detail="No test names found in the extracted data.")
+        # Step 6: Process the API response
+        response_data = response.json()
+        response_data.pop('base64', None)  # Remove unnecessary 'base64' key if present
+        logger.info("Extraction process completed successfully.")
 
-        mapped_tests = [
-            {
-                "input_test_name": name,
-                "matched_test_name": mapped_name,
-                "matched_test_code": mapped_code
-            }
-            for name in test_names
-            if (mapped_name := map_test_code(name, THRESHOLD)[0]) and
-               (mapped_code := map_test_code(name, THRESHOLD)[1])
-        ]
-        logger.info(f"Successfully mapped {len(mapped_tests)} test names.")
-
-        # Step 6: Map Referrer Information
-        ref_name = gpt_response.get("referrer_name", "")
-        matched_ref_name, matched_ref_code, matched_ref_type = map_ref_code(ref_name, THRESHOLD)
-        logger.info("Referrer information mapped successfully.")
-
-        # Step 7: Prepare Payload
-        logger.info("Preparing payload for external API.")
+        # Step 7: Prepare payload for MongoDB insertion
+        extracted_data = response_data.get("extracted_data", {})
+        mapped_tests = response_data.get("mapped_tests", [])
+        extracted_data_AI = {
+            # Extract relevant fields and handle None values
+            "doc_date": str(extracted_data.get("date", "") or ""),
+            "pt_address": str(extracted_data.get("patient_address", "") or ""),
+            "pt_age": str(extracted_data.get("patient_age", "") or ""),
+            "pt_age_period": str(extracted_data.get("patient_age_period", "") or ""),
+            "pt_contact": str(extracted_data.get("patient_contact", "") or ""),
+            "pt_name": str(extracted_data.get("patient_name", "") or ""),
+            "pt_sex": str(extracted_data.get("patient_sex", "") or ""),
+            "pt_title": str(extracted_data.get("patient_title", "") or ""),
+            "ref_name": str(extracted_data.get("referrer_name", "") or ""),
+            "ref_type": str(extracted_data.get("referrer_type", "") or ""),
+            "mapped_ref_name": str(extracted_data.get("matched_ref_name", "") or ""),
+            "mapped_ref_type": str(extracted_data.get("matched_ref_type", "") or ""),
+            "mapped_ref_code": str(extracted_data.get("matched_ref_code", "") or ""),
+            "remark": str(extracted_data.get("remark", "") or ""),
+            "uhid_id": str(extracted_data.get("ID", "") or ""),
+            "prescribed_tests": [
+                {
+                    "extracted_test_name": str(mt.get("input_test_name", "") or ""),
+                    "mapped_test_name": str(mt.get("matched_test_name", "") or ""),
+                    "mapped_test_code": str(mt.get("matched_test_code", "") or ""),
+                } for mt in mapped_tests
+            ]
+        }
         payload = {
-            "extracted_data_AI": {
-                "doc_date": to_empty_string(gpt_response.get("date")),
-                "pt_address": to_empty_string(gpt_response.get("patient_address")),
-                "pt_contact": to_empty_string(gpt_response.get("patient_contact")),
-                "pt_name": to_empty_string(gpt_response.get("patient_name")),
-                "pt_sex": to_empty_string(gpt_response.get("patient_sex")),
-                "pt_title": to_empty_string(gpt_response.get("patient_title")),
-                "ref_name": to_empty_string(gpt_response.get("referrer_name")),
-                "ref_type": to_empty_string(gpt_response.get("referrer_type")),
-                "pt_age": to_empty_string(str(gpt_response.get("patient_age", "Unknown"))),
-                "pt_age_period": to_empty_string(gpt_response.get("patient_age_period", "Unknown")),
-                "mapped_ref_name": to_empty_string(matched_ref_name),
-                "mapped_ref_type": to_empty_string(matched_ref_type),
-                "mapped_ref_code": to_empty_string(matched_ref_code),
-                "remark": to_empty_string(gpt_response.get("remark")),
-                "uhid_id": to_empty_string(gpt_response.get("ID")),
-                "prescribed_tests": [
-                    {
-                        "extracted_test_name": to_empty_string(test.get("input_test_name")),
-                        "mapped_test_name": to_empty_string(test.get("matched_test_name")),
-                        "mapped_test_code": to_empty_string(test.get("matched_test_code"))
-                    }
-                    for test in mapped_tests
-                ],
-            },
-            "created_by": {
-                "userId": "system",
-                "CRNID": "system"
-            },
+            "extracted_data_AI": extracted_data_AI,
+            "created_by": {"userId": "user_id", "CRNID": "crn_id"},
             "created_at": datetime.now().strftime("%Y-%m-%d-%H-%M-%S"),
             "booking_id": request.booking_id,
         }
 
-        # Step 8: Send Data to External API with Timeout
-        logger.info("Sending data to the external API...")
-        async with httpx.AsyncClient() as http_client:
+        # Step 8: Insert the payload into MongoDB via external API
+        db_api_url = "http://51.20.150.57:5009/api/v1/prescriptions"
+        logger.info(f"Sending payload to MongoDB API: {db_api_url}")
+        async with httpx.AsyncClient() as client:
             try:
-                external_api_response = await http_client.post(
-                    "http://IP:Port/api/v1/prescriptions",
-                    json=payload,
-                    timeout=120
-                )
+                db_api_response = await client.post(db_api_url, json=payload, timeout=120)
             except httpx.RequestError as e:
                 logger.error(f"External API communication error: {e}")
-                raise HTTPException(status_code=500, detail="External API request failed.")
-
-        # Step 9: Handle External API Response
-        if external_api_response.status_code == 201:
-            logger.info("Data successfully saved in MongoDB.")
-            response_data = external_api_response.json()
-            response_data["booking_id"] = request.booking_id
-
+                raise HTTPException(status_code=500, detail=f"External API error: {str(e)}")
+        
+        # Handle MongoDB API response
+        if db_api_response.status_code in [200, 201]:
+            response_data = db_api_response.json()
+            
+            # Ensure `_id` is properly formatted
             if '_id' in response_data:
                 response_data['_id'] = str(response_data['_id']).replace("ObjectId(", "").replace(")", "").strip()
                 logger.info(f"Formatted MongoDB _id: {response_data['_id']}")
 
+            # Ensure the `booking_id` is correctly included in the response
+            response_data['booking_id'] = payload.get('booking_id', 'N/A')
+            logger.info("Data saved to MongoDB successfully.")
             return response_data
-        else:
-            logger.error(f"Failed to send data to the external API. "
-                         f"Status code: {external_api_response.status_code}, Response: {external_api_response.text}")
-            raise HTTPException(status_code=external_api_response.status_code, detail=f"Failed to send data: {external_api_response.text}")
 
-    except Exception as e:
-        logger.error(f"An unexpected error occurred: {e}")
-        raise HTTPException(status_code=500, detail="An unexpected error occurred.")
+        else:
+            logger.error(f"MongoDB API error: {db_api_response.status_code} - {db_api_response.text}")
+            raise HTTPException(
+                status_code=db_api_response.status_code,
+                detail=f"MongoDB API error: {db_api_response.text}",
+            )
+
+    except HTTPException as http_exc:
+        logger.error(f"HTTPException occurred: {http_exc.detail}")
+        return JSONResponse(status_code=http_exc.status_code, content={"error": http_exc.detail})
+    except Exception as exc:
+        logger.error(f"Unexpected error occurred: {str(exc)}")
+        return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
