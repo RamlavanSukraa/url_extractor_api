@@ -7,7 +7,7 @@
 #  Summary:    This project facilitates the extraction,  #
 #              mapping, and storage of prescription      #
 #              data using MongoDB. It supports image     #
-#              processing from external                  #
+#              processing from both local and external   #
 #              URLs, converting image data into          #
 #              structured information with AI Agent      #
 #                                                        #
